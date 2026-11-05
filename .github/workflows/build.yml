@@ -105,17 +105,19 @@ jobs:
 
       # 构建顺序不可颠倒：MC_ModUtilities 是叶子节点，必须先产出 jar，
       # BankSystem 的 flatDir 才能解析到 modutilities 产物。
+      # 必须覆盖 common/fabric/neoforge 全部三个模块：Gradle 在配置阶段会加载
+      # 同级模块，缺少 fabric 产物会让下游模块回落到 JitPack 并失败。
       - name: Build MC_ModUtilities
         run: |
           cd "$DEP_UTILITIES"
           chmod +x ./gradlew
-          ./gradlew :common:build :neoforge:build --stacktrace --no-daemon
+          ./gradlew :common:build :fabric:build :neoforge:build --stacktrace --no-daemon
 
       - name: Build BankSystem
         run: |
           cd "$DEP_BANK"
           chmod +x ./gradlew
-          ./gradlew :common:build :neoforge:build --stacktrace --no-daemon
+          ./gradlew :common:build :fabric:build :neoforge:build --stacktrace --no-daemon
 
       - name: Build StockMarket NeoForge module
         run: |
