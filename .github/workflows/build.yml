@@ -5,6 +5,7 @@ on:
     branches:
       - main
       - "mc_1.21.1"
+      - "feature/**"
     paths-ignore:
       - "**.md"
       - "documentation/**"
