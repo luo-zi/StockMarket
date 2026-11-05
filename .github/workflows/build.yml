@@ -55,18 +55,34 @@ jobs:
       # 否则依赖只能回落到 JitPack，而未发布版本在 JitPack 上并不存在。
       - name: Prepare sibling workspace
         run: |
-          MC_VER=$(grep -E '^minecraft_version' gradle.properties | cut -d'=' -f2 | tr -d ' \r')
+          read_prop() { grep -E "^$2" "$1" | cut -d'=' -f2 | tr -d ' \r'; }
+          MC_VER=$(read_prop gradle.properties minecraft_version)
+          UTILS_REF=$(read_prop gradle.properties modutilities_version)
+          BANK_REF=$(read_prop gradle.properties banksystem_version)
           ROOT=$(dirname "$(dirname "$GITHUB_WORKSPACE")")
           echo "MC_VER=$MC_VER" >> "$GITHUB_ENV"
           echo "WORKSPACE_ROOT=$ROOT" >> "$GITHUB_ENV"
           echo "DEP_UTILITIES=$ROOT/MC_ModUtilities/mc_${MC_VER}_MC_ModUtilities" >> "$GITHUB_ENV"
           echo "DEP_BANK=$ROOT/BankSystem/mc_${MC_VER}_BankSystem" >> "$GITHUB_ENV"
-          echo "Minecraft $MC_VER | workspace root: $ROOT"
+          echo "DEP_UTILS_REF=$UTILS_REF" >> "$GITHUB_ENV"
+          echo "DEP_BANK_REF=$BANK_REF" >> "$GITHUB_ENV"
+          echo "Minecraft $MC_VER | utilities@$UTILS_REF | banksystem@$BANK_REF | root: $ROOT"
 
+      # 依赖版本号即发布 tag：用 tag 取材可精确复现某一发布版本的依赖组合；
+      # 开发中的版本尚无 tag（如 2.1.3），此时回落到默认分支并由版本守卫兜底校验。
       - name: Clone dependency repositories
         run: |
-          git clone --depth 1 https://github.com/KROIA/MC_ModUtilities.git "$DEP_UTILITIES"
-          git clone --depth 1 https://github.com/KROIA/BankSystem.git "$DEP_BANK"
+          clone_ref() {
+            if git clone --depth 1 --branch "$3" "$1" "$2" 2>/dev/null; then
+              echo "cloned $2 @ $3"
+            else
+              echo "::warning::$1 不存在 tag $3，回落到默认分支 HEAD"
+              rm -rf "$2"
+              git clone --depth 1 "$1" "$2"
+            fi
+          }
+          clone_ref https://github.com/KROIA/MC_ModUtilities.git "$DEP_UTILITIES" "$DEP_UTILS_REF"
+          clone_ref https://github.com/KROIA/BankSystem.git "$DEP_BANK" "$DEP_BANK_REF"
           ls -d "$DEP_UTILITIES" "$DEP_BANK"
 
       # 三道防线：MC 版本线一致、依赖版本号与本仓库声明一致。不一致时构建会在
