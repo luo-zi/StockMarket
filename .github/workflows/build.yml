@@ -24,14 +24,15 @@ concurrency:
   cancel-in-progress: true
 
 env:
-  # Loom 需要为 Minecraft 反编译/重映射预留足够堆内存，2G 在 CI 上容易 OOM
+  # Loom 需要为 Minecraft 反编译/重映射预留足够堆内存
   GRADLE_OPTS: "-Dorg.gradle.jvmargs=-Xmx3G -Dorg.gradle.daemon=false"
 
 jobs:
   build-neoforge:
     name: Build NeoForge jar
     runs-on: ubuntu-latest
-    timeout-minutes: 60
+    # 三个 Loom 工程串行构建，首次运行需要下载并反编译 Minecraft
+    timeout-minutes: 90
 
     steps:
       - name: Checkout
@@ -46,31 +47,96 @@ jobs:
       - name: Set up Gradle
         uses: gradle/actions/setup-gradle@v4
         with:
-          # 只有主分支写缓存，PR 只读，避免污染缓存
           cache-read-only: ${{ github.ref != 'refs/heads/main' }}
 
-      - name: Read mod version
-        id: mod
+      # 该项目族的构建模型是「同级目录多仓库检出」：各模块 build.gradle 的 flatDir
+      # 通过 ../../../<Repo>/mc_<mcver>_<Repo> 定位依赖产物。CI 复现该布局，
+      # 否则依赖只能回落到 JitPack，而未发布版本在 JitPack 上并不存在。
+      - name: Prepare sibling workspace
         run: |
-          VERSION=$(grep -E '^mod_version' gradle.properties | cut -d'=' -f2 | tr -d ' \r')
-          echo "version=${VERSION}" >> "$GITHUB_OUTPUT"
-          echo "Mod version: ${VERSION}"
+          MC_VER=$(grep -E '^minecraft_version' gradle.properties | cut -d'=' -f2 | tr -d ' \r')
+          ROOT=$(dirname "$(dirname "$GITHUB_WORKSPACE")")
+          echo "MC_VER=$MC_VER" >> "$GITHUB_ENV"
+          echo "WORKSPACE_ROOT=$ROOT" >> "$GITHUB_ENV"
+          echo "DEP_UTILITIES=$ROOT/MC_ModUtilities/mc_${MC_VER}_MC_ModUtilities" >> "$GITHUB_ENV"
+          echo "DEP_BANK=$ROOT/BankSystem/mc_${MC_VER}_BankSystem" >> "$GITHUB_ENV"
+          echo "Minecraft $MC_VER | workspace root: $ROOT"
 
-      - name: Make gradlew executable
-        run: chmod +x ./gradlew
+      - name: Clone dependency repositories
+        run: |
+          git clone --depth 1 https://github.com/KROIA/MC_ModUtilities.git "$DEP_UTILITIES"
+          git clone --depth 1 https://github.com/KROIA/BankSystem.git "$DEP_BANK"
+          ls -d "$DEP_UTILITIES" "$DEP_BANK"
 
-      - name: Build NeoForge module
-        run: ./gradlew :neoforge:build --stacktrace --no-daemon
+      # 三道防线：MC 版本线一致、依赖版本号与本仓库声明一致。不一致时构建会在
+      # 依赖解析阶段以晦涩信息失败，这里提前给出明确原因。
+      - name: Verify dependency version alignment
+        run: |
+          set -euo pipefail
+          read_prop() { grep -E "^$2" "$1" | cut -d'=' -f2 | tr -d ' \r'; }
+
+          EXPECT_MC=$(read_prop gradle.properties minecraft_version)
+          DEP_MC=$(read_prop "$DEP_UTILITIES/gradle.properties" minecraft_version)
+          BANK_MC=$(read_prop "$DEP_BANK/gradle.properties" minecraft_version)
+
+          EXPECT_UTILS=$(read_prop gradle.properties modutilities_version)
+          DEP_UTILS=$(read_prop "$DEP_UTILITIES/gradle.properties" mod_version)
+          EXPECT_BANK=$(read_prop gradle.properties banksystem_version)
+          DEP_BANK=$(read_prop "$DEP_BANK/gradle.properties" mod_version)
+
+          echo "minecraft:    expected=$EXPECT_MC utilities=$DEP_MC banksystem=$BANK_MC"
+          echo "modutilities: expected=$EXPECT_UTILS source=$DEP_UTILS"
+          echo "banksystem:   expected=$EXPECT_BANK source=$DEP_BANK"
+
+          fail=0
+          if [ "$EXPECT_MC" != "$DEP_MC" ] || [ "$EXPECT_MC" != "$BANK_MC" ]; then
+            echo "::error::Minecraft 版本不一致，同级检出的仓库必须属于同一版本线"
+            fail=1
+          fi
+          if [ "$EXPECT_UTILS" != "$DEP_UTILS" ]; then
+            echo "::error::modutilities 版本不匹配：本仓库期望 $EXPECT_UTILS，检出源码为 $DEP_UTILS"
+            fail=1
+          fi
+          if [ "$EXPECT_BANK" != "$DEP_BANK" ]; then
+            echo "::error::banksystem 版本不匹配：本仓库期望 $EXPECT_BANK，检出源码为 $DEP_BANK"
+            fail=1
+          fi
+          exit $fail
+
+      # 构建顺序不可颠倒：MC_ModUtilities 是叶子节点，必须先产出 jar，
+      # BankSystem 的 flatDir 才能解析到 modutilities 产物。
+      - name: Build MC_ModUtilities
+        run: |
+          cd "$DEP_UTILITIES"
+          chmod +x ./gradlew
+          ./gradlew :common:build :neoforge:build --stacktrace --no-daemon
+
+      - name: Build BankSystem
+        run: |
+          cd "$DEP_BANK"
+          chmod +x ./gradlew
+          ./gradlew :common:build :neoforge:build --stacktrace --no-daemon
+
+      - name: Build StockMarket NeoForge module
+        run: |
+          chmod +x ./gradlew
+          ./gradlew :neoforge:build --stacktrace --no-daemon
 
       - name: Verify artifacts
         run: |
-          echo "=== neoforge/build/libs ==="
+          MOD_VERSION=$(grep -E '^mod_version' gradle.properties | cut -d'=' -f2 | tr -d ' \r')
+          echo "MOD_VERSION=$MOD_VERSION" >> "$GITHUB_ENV"
+          echo "=== MC_ModUtilities ==="
+          ls -1 "$DEP_UTILITIES/neoforge/build/libs" || true
+          echo "=== BankSystem ==="
+          ls -1 "$DEP_BANK/neoforge/build/libs" || true
+          echo "=== StockMarket neoforge ==="
           ls -lh neoforge/build/libs || true
 
       - name: Upload NeoForge jar
         uses: actions/upload-artifact@v4
         with:
-          name: stockmarket-neoforge-${{ steps.mod.outputs.version }}
+          name: stockmarket-neoforge-${{ env.MOD_VERSION }}
           path: |
             neoforge/build/libs/*.jar
             !neoforge/build/libs/*-dev*.jar
@@ -85,8 +151,6 @@ jobs:
             echo "### NeoForge 1.21.1 build"
             echo ""
             echo "- Commit: \`${GITHUB_SHA:0:7}\`"
-            echo "- Mod version: \`${{ steps.mod.outputs.version }}\`"
-            echo "- Gradle: \`$(grep distributionUrl gradle/wrapper/gradle-wrapper.properties | sed 's/.*gradle-//; s/-bin.zip//')\`"
-            echo ""
-            echo "Artifact \`stockmarket-neoforge-${{ steps.mod.outputs.version }}\` contains the remapped production jar from \`neoforge/build/libs\` (dev-shadow / sources excluded)."
+            echo "- Workspace root: \`$WORKSPACE_ROOT\`"
+            echo "- Dependencies: MC_ModUtilities + BankSystem（同级检出、源码构建）"
           } >> "$GITHUB_STEP_SUMMARY"
